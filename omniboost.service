@@ -1,0 +1,11 @@
+[Unit]
+Description=OmniBoost Universal Hardware Governor Loader
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omniboost --apply-saved
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
