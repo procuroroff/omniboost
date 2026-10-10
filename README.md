@@ -49,7 +49,7 @@ Unlike platform-specific tools, **OmniBoost** automatically discovers the host's
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/omniboost.git
+git clone https://github.com/procuroroff/omniboost.git
 cd omniboost
 sudo ./install.sh
 ```
