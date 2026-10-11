@@ -5,7 +5,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  OMNIBOOST v3.0 // UNIVERSAL LINUX HARDWARE & KERNEL GOVERNOR               │
+│  OMNIBOOST v3.1 // UNIVERSAL LINUX HARDWARE & KERNEL GOVERNOR               │
 │  CPU: Auto-Detect (Intel / AMD / ARM) | CORES: Dynamic Core Discovery       │
 │  GPU: Auto-Detect (Intel i915 / AMD amdgpu / NVIDIA proprietary)            │
 │  SUBSYSTEM: P-State / CPB / DPM / Block I/O / sysctl latency / PCIe ASPM    │
@@ -27,12 +27,14 @@ Unlike platform-specific tools, **OmniBoost** automatically discovers the host's
 - **Block Storage I/O Optimization:**
   - Automatic detection of drive types (NVMe SSD, SATA SSD, HDD).
   - Low-overhead I/O scheduler selection (`none` for NVMe, `mq-deadline`/`bfq` for SATA/rotational).
-  - Dynamic read-ahead buffer tuning (2048 KB for burst performance).
+  - Dynamic read-ahead buffer tuning (2048 KB for burst performance, 128 KB stock).
 - **Kernel Latency & Memory Pressure:**
   - PCIe ASPM (`performance`, `default`, `powersupersave`).
   - Memory paging (`vm.swappiness`, `vfs_cache_pressure`).
   - Interrupt overhead reduction (`nmi_watchdog` disable).
   - x86 Split-lock mitigation bypass for stutter-free gaming under Wine/Proton.
+- **Stock / Factory Reset:**
+  - One-click reversion of all kernel and hardware parameters back to distribution and BIOS defaults.
 
 ---
 
@@ -43,6 +45,7 @@ Unlike platform-specific tools, **OmniBoost** automatically discovers the host's
 | **Extreme** | 100% floor, EPP `performance`, Turbo/CPB unconstrained | Locked max clocks (Intel RP0 / AMD High / NVIDIA PM) | NVMe `none`, Read-ahead 2048k | ASPM: perf, Split-lock: bypass, NMI: 0 |
 | **Balanced** | Dynamic HWP / Schedutil, EPP `balance_performance` | Dynamic DPM (Auto scaling) | Default schedulers | ASPM: default, Swappiness: 60 |
 | **Powersave** | Turbo OFF, Capped P-State, EPP `power` | Low clock ceiling | Power-saving links | ASPM: powersupersave, Silent fans |
+| **Default / Stock**| Factory dynamic curves, standard distribution governor | Stock dynamic scaling | Kernel standard read-ahead (128k) | ASPM: default, Kernel defaults restored |
 
 ---
 
@@ -69,6 +72,7 @@ omniboost
 omniboost extreme     # Engage Extreme Performance profile
 omniboost balanced    # Engage Balanced Adaptive profile
 omniboost powersave   # Engage Powersave / Silent profile
+omniboost default     # Restore System / OEM Factory defaults
 omniboost status      # Output hardware discovery & telemetry summary
 omniboost monitor     # Launch real-time telemetry dashboard
 ```

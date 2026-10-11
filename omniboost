@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OMNIBOOST v3.0 // Universal Linux Kernel Power, Frequency & Latency Governor
+OMNIBOOST v3.1 // Universal Linux Kernel Power, Frequency & Latency Governor
 Cross-platform hardware governor supporting:
   - CPU: Intel (intel_pstate / RAPL), AMD (amd_pstate / P-State EPP / acpi_cpufreq), ARM
   - GPU: Intel (i915/Xe), AMD (amdgpu DPM), NVIDIA (nvidia-smi)
   - Block I/O: NVMe, SATA SSD, HDD (scheduler & read-ahead)
   - Kernel: sysctl latency tuning, PCIe ASPM, THP, VM memory pressure
+  - Profiles: Extreme, Balanced, Powersave, and System/OEM Default Stock
 """
 
 import sys
@@ -93,17 +94,14 @@ class HardwareProbe:
 
     def _detect_gpus(self):
         gpus = []
-        # Check Intel DRM
         for card in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
             if os.path.exists(f"{card}/gt_max_freq_mhz") or os.path.exists(f"{card}/gt/gt0/max_freq_mhz"):
                 gpus.append({"type": "intel", "path": card, "name": "Intel Graphics (i915/Xe)"})
                 break
-        # Check AMD DRM
         for card in sorted(glob.glob("/sys/class/drm/card[0-9]*/device")):
             if os.path.exists(f"{card}/power_dpm_force_performance_level"):
                 gpus.append({"type": "amd", "path": card, "name": "AMD Radeon (amdgpu)"})
                 break
-        # Check NVIDIA
         if os.path.exists("/proc/driver/nvidia/version") or os.path.exists("/usr/bin/nvidia-smi"):
             gpus.append({"type": "nvidia", "path": "nvidia-smi", "name": "NVIDIA GeForce / RTX"})
         
@@ -196,29 +194,42 @@ def apply_universal_profile(hw: HardwareProbe, profile_name: str):
             write_node("/sys/devices/system/cpu/intel_pstate/min_perf_pct", "20")
             write_node("/sys/devices/system/cpu/intel_pstate/max_perf_pct", "50")
             emit_kernel_log("intel_pstate", "HWP_PERF_LIMITS [0x771]", "limits=?", "min=20% max=50%", dt(), "Strict frequency cap / silent operation")
+        elif profile_name in ["default", "stock"]:
+            write_node("/sys/devices/system/cpu/intel_pstate/no_turbo", "0")
+            write_node("/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost", "0")
+            write_node("/sys/devices/system/cpu/intel_pstate/min_perf_pct", "20")
+            write_node("/sys/devices/system/cpu/intel_pstate/max_perf_pct", "100")
+            emit_kernel_log("intel_pstate", "HWP_PERF_LIMITS [0x771]", "limits=?", "min=20% max=100%", dt(), "OEM factory Speed Shift dynamic curve")
 
     elif hw.has_amd_boost:
-        # AMD Boost toggle
         target_boost = "0" if profile_name == "powersave" else "1"
         write_node("/sys/devices/system/cpu/cpufreq/boost", target_boost)
         emit_kernel_log("amd_pstate", "CORE_PERF_BOOST [CPB]", "boost=?", f"{target_boost} ({'ENABLED' if target_boost == '1' else 'DISABLED'})", dt())
 
-    # 2. CPU GOVERNORS & EPP (Any CPU)
-    target_gov = "performance" if profile_name == "extreme" else "powersave"
-    target_epp = "performance" if profile_name == "extreme" else ("balance_performance" if profile_name == "balanced" else "power")
+    # 2. CPU GOVERNORS & EPP
+    if profile_name == "extreme":
+        target_gov = "performance"
+        target_epp = "performance"
+    elif profile_name == "powersave":
+        target_gov = "powersave"
+        target_epp = "power"
+    elif profile_name in ["default", "stock"]:
+        target_gov = "powersave" if "pstate" in hw.cpu_driver else "schedutil"
+        target_epp = "balance_performance"
+    else:  # balanced
+        target_gov = "powersave" if "pstate" in hw.cpu_driver else "schedutil"
+        target_epp = "balance_performance"
 
-    # Set governor across all cores
     for gov_node in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor"):
         write_node(gov_node, target_gov)
     emit_kernel_log("cpufreq", f"SCALING_GOVERNOR [{hw.cpu_cores} Cores]", "prev_gov", target_gov, dt(), "Core clock policy committed")
 
-    # Set EPP across all cores if available
     if hw.has_epp:
         for epp_node in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference"):
             write_node(epp_node, target_epp)
         emit_kernel_log("cpufreq/epp", f"ENERGY_PERF_BIAS [{hw.cpu_cores} Cores]", "prev_epp", target_epp, dt(), "Hardware responsiveness curve")
 
-    # 3. GPU TUNING (Intel, AMD, NVIDIA)
+    # 3. GPU TUNING
     for gpu in hw.gpus:
         if gpu["type"] == "intel":
             card = gpu["path"]
@@ -228,31 +239,34 @@ def apply_universal_profile(hw: HardwareProbe, profile_name: str):
                 write_node(f"{card}/gt_max_freq_mhz", max_f)
                 write_node(f"{card}/gt_boost_freq_mhz", max_f)
                 emit_kernel_log("drm/i915", "GT_FREQUENCY_LOCK", "dyn", f"{max_f}MHz (RP0)", dt(), "GPU floor locked to prevent frame drop")
-            elif profile_name == "balanced":
-                min_f = read_node(f"{card}/gt_RPn_freq_mhz", "200")
-                max_f = read_node(f"{card}/gt_RP0_freq_mhz", "1200")
-                write_node(f"{card}/gt_min_freq_mhz", min_f)
-                write_node(f"{card}/gt_max_freq_mhz", max_f)
-                write_node(f"{card}/gt_boost_freq_mhz", max_f)
-                emit_kernel_log("drm/i915", "GT_FREQUENCY_AUTO", "clamped", f"{min_f}-{max_f}MHz", dt(), "Dynamic GPU clock scaling")
             elif profile_name == "powersave":
                 min_f = read_node(f"{card}/gt_RPn_freq_mhz", "200")
                 cap_f = read_node(f"{card}/gt_RP1_freq_mhz", "600")
                 write_node(f"{card}/gt_min_freq_mhz", min_f)
                 write_node(f"{card}/gt_max_freq_mhz", cap_f)
                 emit_kernel_log("drm/i915", "GT_FREQUENCY_CAP", "max=1200", f"max={cap_f}MHz", dt(), "Power-saving graphics clamp")
+            else:  # balanced or default
+                min_f = read_node(f"{card}/gt_RPn_freq_mhz", "200")
+                max_f = read_node(f"{card}/gt_RP0_freq_mhz", "1200")
+                write_node(f"{card}/gt_min_freq_mhz", min_f)
+                write_node(f"{card}/gt_max_freq_mhz", max_f)
+                write_node(f"{card}/gt_boost_freq_mhz", max_f)
+                emit_kernel_log("drm/i915", "GT_FREQUENCY_AUTO", "clamped", f"{min_f}-{max_f}MHz", dt(), "Dynamic GPU clock scaling")
 
         elif gpu["type"] == "amd":
             card = gpu["path"]
             dpm_path = f"{card}/power_dpm_force_performance_level"
-            level = "high" if profile_name == "extreme" else ("auto" if profile_name == "balanced" else "low")
+            level = "high" if profile_name == "extreme" else ("low" if profile_name == "powersave" else "auto")
             write_node(dpm_path, level)
             emit_kernel_log("drm/amdgpu", "DPM_FORCE_PERF_LEVEL", "prev", level, dt(), "Radeon DPM state switch")
 
         elif gpu["type"] == "nvidia":
             if profile_name == "extreme":
                 subprocess.run(["nvidia-smi", "-pm", "1"], capture_output=True)
-                emit_kernel_log("nvidia-driver", "NVIDIA_PERSISTENCE_MODE", "0", "1 (ENABLED)", dt(), "Keeps driver loaded / eliminates init lag")
+                emit_kernel_log("nvidia-driver", "NVIDIA_PERSISTENCE_MODE", "0", "1 (ENABLED)", dt(), "Driver loaded persistently")
+            elif profile_name in ["default", "stock"]:
+                subprocess.run(["nvidia-smi", "-pm", "0"], capture_output=True)
+                emit_kernel_log("nvidia-driver", "NVIDIA_PERSISTENCE_MODE", "1", "0 (DEFAULT)", dt(), "Stock persistence disabled")
 
     # 4. BLOCK I/O SCHEDULER & READ-AHEAD
     for bdev in hw.block_devs:
@@ -267,12 +281,12 @@ def apply_universal_profile(hw: HardwareProbe, profile_name: str):
                 target_sched = "bfq"
             write_node(sched_file, target_sched)
             
-            ra_val = "2048" if profile_name == "extreme" else "512"
+            ra_val = "2048" if profile_name == "extreme" else "128" if profile_name in ["default", "stock"] else "512"
             write_node(ra_file, ra_val)
             emit_kernel_log("block/io", f"DEV: {bdev['name']} ({bdev['type']})", "sched", f"{target_sched} [ra:{ra_val}k]", dt(), "Storage latency optimized")
 
     # 5. KERNEL & MEMORY LATENCY (SYSCTL)
-    swappiness_val = "10" if profile_name == "extreme" else ("60" if profile_name == "balanced" else "80")
+    swappiness_val = "10" if profile_name == "extreme" else ("80" if profile_name == "powersave" else "60")
     write_node("/proc/sys/vm/swappiness", swappiness_val)
     emit_kernel_log("mm/vm", "sysctl vm.swappiness", "prev", swappiness_val, dt(), "RAM vs Swap page priority")
 
@@ -292,9 +306,14 @@ def apply_universal_profile(hw: HardwareProbe, profile_name: str):
         emit_kernel_log("pcie_aspm", "PCIe_LINK_POWER_POLICY", "prev", aspm_val, dt(), "PCI Express link state")
 
     # 6. RAPL (if available on Intel)
-    if hw.has_rapl and profile_name == "extreme":
-        write_node("/sys/class/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw", "30000000")
-        emit_kernel_log("intel_rapl", "RAPL_PL1_POWER_CAP", "stock", "30000000 uW (30W)", dt(), "Thermal envelope maximized")
+    if hw.has_rapl:
+        if profile_name == "extreme":
+            write_node("/sys/class/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw", "30000000")
+            emit_kernel_log("intel_rapl", "RAPL_PL1_POWER_CAP", "stock", "30000000 uW (30W)", dt(), "Thermal envelope maximized")
+        elif profile_name in ["default", "stock"]:
+            write_node("/sys/class/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw", "200000000")
+            write_node("/sys/class/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw", "42000000")
+            emit_kernel_log("intel_rapl", "RAPL_PL1_POWER_CAP", "prev", "OEM factory BIOS limits", dt(), "Stock thermal bounds restored")
 
     # Persist config
     write_node(CONFIG_FILE, profile_name)
@@ -304,7 +323,7 @@ def apply_universal_profile(hw: HardwareProbe, profile_name: str):
 def print_banner(hw: HardwareProbe):
     print(f"\033[2J\033[H", end="")
     print(f"{C_CYAN}┌─────────────────────────────────────────────────────────────────────────────┐{C_RESET}")
-    print(f"{C_CYAN}│  {C_BOLD}{C_WHITE}OMNIBOOST v3.0{C_RESET} {C_DIM}// UNIVERSAL LINUX HARDWARE & KERNEL GOVERNOR{C_RESET}             {C_CYAN}│{C_RESET}")
+    print(f"{C_CYAN}│  {C_BOLD}{C_WHITE}OMNIBOOST v3.1{C_RESET} {C_DIM}// UNIVERSAL LINUX HARDWARE & KERNEL GOVERNOR{C_RESET}             {C_CYAN}│{C_RESET}")
     print(f"{C_CYAN}│  {C_GREEN}CPU:{C_RESET} {hw.cpu_model[:46]:46s} {C_CYAN}│{C_RESET}")
     print(f"{C_CYAN}│  {C_GREEN}ARCH:{C_RESET} {hw.arch:8s} | {C_GREEN}CORES:{C_RESET} {hw.cpu_cores:2d} | {C_GREEN}DRIVER:{C_RESET} {hw.cpu_driver:16s} | {C_GREEN}PWR:{C_RESET} {hw.power_source:14s} {C_CYAN}│{C_RESET}")
     gpu_names = ", ".join([g['name'] for g in hw.gpus])
@@ -314,7 +333,7 @@ def print_banner(hw: HardwareProbe):
 def print_telemetry(hw: HardwareProbe):
     cpu_info = get_cpu_freq_summary()
     temp = get_live_temp()
-    active_prof = read_node(CONFIG_FILE, "BALANCED")
+    active_prof = read_node(CONFIG_FILE, "DEFAULT")
     
     t_col = C_GREEN if temp < 55 else (C_YELLOW if temp < 75 else C_RED)
     mhz_display = " | ".join([f"C{i}:{f}M" for i, f in enumerate(cpu_info['freqs'][:8])])
@@ -347,7 +366,7 @@ def run_live_monitor(hw: HardwareProbe):
 
 def enable_systemd():
     content = """[Unit]
-Description=OmniBoost Universal Kernel Hardware Profile Loader
+Description=OmniBoost Universal Hardware Governor Loader
 After=multi-user.target
 
 [Service]
@@ -374,8 +393,9 @@ def interactive_loop():
         print(f"  {C_CYAN}[1]{C_RESET} {C_BOLD}{C_RED}EXTREME PERFORMANCE{C_RESET} -> Max CPU clocks, unconstrained GPU, low-latency I/O & sysctl")
         print(f"  {C_CYAN}[2]{C_RESET} {C_BOLD}{C_CYAN}BALANCED ADAPTIVE{C_RESET}   -> Dynamic energy/compute curve, optimal daily productivity")
         print(f"  {C_CYAN}[3]{C_RESET} {C_BOLD}{C_GREEN}POWERSAVE / SILENT{C_RESET}  -> Capped clocks, deepest C-states & ASPM, cool & quiet")
-        print(f"  {C_CYAN}[4]{C_RESET} {C_BOLD}{C_YELLOW}LIVE TELEMETRY{C_RESET}      -> Continuous hardware sensor feed")
-        print(f"  {C_CYAN}[5]{C_RESET} {C_BOLD}{C_WHITE}ENABLE ON BOOT{C_RESET}      -> Install & enable automated systemd persistence")
+        print(f"  {C_CYAN}[4]{C_RESET} {C_BOLD}{C_WHITE}DEFAULT / STOCK (OEM){C_RESET}-> Revert all hardware registers to factory Linux kernel defaults")
+        print(f"  {C_CYAN}[5]{C_RESET} {C_BOLD}{C_YELLOW}LIVE TELEMETRY{C_RESET}      -> Continuous hardware sensor feed")
+        print(f"  {C_CYAN}[6]{C_RESET} {C_BOLD}{C_WHITE}ENABLE ON BOOT{C_RESET}      -> Install & enable automated systemd persistence")
         print(f"  {C_CYAN}[0]{C_RESET} {C_DIM}EXIT{C_RESET}")
 
         try:
@@ -394,8 +414,11 @@ def interactive_loop():
             apply_universal_profile(hw, "powersave")
             input(f"  {C_DIM}Press Enter to return to menu...{C_RESET}")
         elif choice == "4":
-            run_live_monitor(hw)
+            apply_universal_profile(hw, "default")
+            input(f"  {C_DIM}Press Enter to return to menu...{C_RESET}")
         elif choice == "5":
+            run_live_monitor(hw)
+        elif choice == "6":
             enable_systemd()
             input(f"  {C_DIM}Press Enter to return to menu...{C_RESET}")
         elif choice in ["0", "q", "exit"]:
@@ -410,20 +433,22 @@ if __name__ == "__main__":
         arg = sys.argv[1].lower()
         hw = HardwareProbe()
         if arg in ["--apply-saved", "-s"]:
-            saved = read_node(CONFIG_FILE, "balanced")
+            saved = read_node(CONFIG_FILE, "default")
             apply_universal_profile(hw, saved)
         elif arg in ["extreme", "turbo", "boost", "perf"]:
             apply_universal_profile(hw, "extreme")
-        elif arg in ["balanced", "default"]:
+        elif arg in ["balanced"]:
             apply_universal_profile(hw, "balanced")
         elif arg in ["powersave", "eco", "quiet"]:
             apply_universal_profile(hw, "powersave")
+        elif arg in ["default", "stock", "reset"]:
+            apply_universal_profile(hw, "default")
         elif arg in ["status", "stat"]:
             print_banner(hw)
             print_telemetry(hw)
         elif arg in ["monitor", "live"]:
             run_live_monitor(hw)
         else:
-            print(f"Usage: omniboost [extreme | balanced | powersave | status | monitor]")
+            print(f"Usage: omniboost [extreme | balanced | powersave | default | status | monitor]")
     else:
         interactive_loop()
